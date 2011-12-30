@@ -2,20 +2,24 @@ package DBIx::Class::Indexer::WebService::Dezi;
 
 use Moose;
 
+use Carp;
 use Dezi::Client;
+use MIME::Base64 qw(encode_base64);
+use Media::Type::Simple;
 use Scalar::Util ();
+use File::Slurp;
 
 =head1 NAME
 
-DBIx::Class::Indexer::WebService::Dezi - The great new DBIx::Class::Indexer::WebService::Dezi!
+DBIx::Class::Indexer::WebService::Dezi - An indexer for Dezi/Lucy.
 
 =head1 VERSION
 
-Version 0.01
+Version 0.03
 
 =cut
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 around BUILDARGS => sub {
     my ( $orig, $class, $connect_info, $source ) = @_;
@@ -31,8 +35,8 @@ use a Dezi::Client to update the index on "insert", "update", or "delete".
     package MyApp::Schema::Foo; 
     use base 'DBIx::Class';
 
-    __PACKAGE__->load_components(qw[ Indexed ] );
-    __PACKAGE__->set_indexer('WebService::Dezi', { server => 'http://localhost:5000', content_type => 'application/json' });
+    __PACKAGE__->load_components( qw[ Indexed ] );
+    __PACKAGE__->set_indexer( 'WebService::Dezi', { server => 'http://localhost:5000', content_type => 'application/json' } );
     
     __PACKAGE__->table('person');
     
@@ -43,30 +47,46 @@ use a Dezi::Client to update the index on "insert", "update", or "delete".
             is_nullable     => 0,
         },
         name => {
-            data_type => 'varchar',
-            is_nullable => 0,
-            indexed => 1 
+            data_type       => 'varchar',
+            is_nullable     => 0,
+            indexed         => 1 
         },
         age => {
-            data_type => 'integer',
-            is_nullable => 0,
+            data_type       => 'integer',
+            is_nullable     => 0,
         },
         image_path => {
             data_type       => 'varchar',
             size            => '128',
-            indexed         => 1,
+            indexed         => { is_binary => 1, base64_encode => 1 },
         },
         email => {
-            data_type => 'varchar',
-            size=>'128',
+            data_type       => 'varchar',
+            size            => '128',
         },
         created => {
-            data_type => 'timestamp',
-            set_on_create => 1,
-            is_nullable => 0,
+            data_type       => 'timestamp',
+            set_on_create   => 1,
+            is_nullable     => 0,
         },
     );
 
+=head1 CONFIG 
+
+=head2 indexed
+
+Can be set to 1 or contain a hashref.
+
+=head2 is_binary
+
+Flags an indexied field as a binary pointer. Will attempt
+to slurp the contents for indexing.
+
+=head2 base64_encode
+
+A flag that will make a is_binary indexed field converted 
+to base64. It is worth noting that highlighting needs to be
+turned off in the dezi config for this to properly index.
 
 =head1 ATTRIBUTES
 
@@ -127,8 +147,8 @@ has _field_prep => (
 
 =head2 as_document( $self, $object )
 
-Handles the insert operation. Generates a XML document that will be
-indexed by the dezi service.
+Handles the insert operation. Generates a XML or JSON document 
+that will be indexed by the dezi service.
 
 =cut
 
@@ -138,12 +158,26 @@ sub as_document {
     my $fields = $object->index_fields;
 
     my %output;
-
-
-    # for each field...
+    # for each field in schema...
     for my $name ( keys %$fields ) {
         my $opts    = $fields->{$name};
         my @values  = $self->value_for_field( $object, $name );
+
+        if ( defined $opts->{is_binary} ) {
+            my $file_path    = $values[0];
+
+            my $content_type = $self->_determine_content_type($file_path);
+            my $binary_data  = $self->_read_binary($file_path);
+
+            @values = ($content_type, $binary_data);
+
+            if ( defined $opts->{base64_encode} ) {
+                @values = ($content_type, encode_base64($binary_data));
+            } else {
+                @values = ($content_type, $binary_data);
+            }
+
+        }
     
         for( @values ) {
             $output{$name} = [ @values ]
@@ -154,7 +188,6 @@ sub as_document {
 
     return \$output_str;
 }
-
 
 =head2 BUILD( $self )
 
@@ -299,6 +332,19 @@ sub update {
     $self->update_or_create_document( $object );
 }
 
+sub _determine_content_type {
+    my ( $self, $file_path ) = @_;
+    my $ext     = $file_path =~ s/.*\.([^\.])/$1/r;
+    my $type    = type_from_ext($ext);
+    return $type;
+}
+
+sub _read_binary {
+    my ( $self, $file_path ) = @_;
+    my $bin_data = read_file( $file_path, binmode => ':raw' ) ;
+    return $bin_data;
+}
+
 sub _generate_document {
     my ( $self, $fields ) = @_;
 
@@ -354,9 +400,7 @@ L<http://search.cpan.org/dist/DBIx-Class-Indexer-WebService-Dezi/>
 
 =back
 
-
 =head1 ACKNOWLEDGEMENTS
-
 
 =head1 LICENSE AND COPYRIGHT
 
